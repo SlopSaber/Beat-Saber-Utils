@@ -8,6 +8,8 @@
         <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
         <AssemblyName>BS_Utils</AssemblyName>
         <RootNamespace>BS_Utils</RootNamespace>
+        <EnableFrameworkPathOverride>true</EnableFrameworkPathOverride>
+        <FrameworkPathOverride>$(BeatSaberDir)\Beat Saber_Data\Managed</FrameworkPathOverride>
         <LocalRefsDir Condition="Exists('..\Refs')">..\Refs</LocalRefsDir>
         <BeatSaberDir>$(LocalRefsDir)</BeatSaberDir>
         <AppOutputBase>$(MSBuildProjectDirectory)\</AppOutputBase>
@@ -34,6 +36,10 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <Reference Include="netstandard">
+            <HintPath>$(BeatSaberDir)\Beat Saber_Data\Managed\netstandard.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
         <Reference Include="0Harmony">
             <HintPath>$(BeatSaberDir)\Libs\0Harmony.dll</HintPath>
             <Private>False</Private>
