@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using System.Linq;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Zenject;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using BS_Utils.Utilities.Events;
 using static GameScenesManager;
 
@@ -65,6 +66,12 @@ namespace BS_Utils.Utilities
         readonly string[] MainSceneNames = { SceneNames.Game, SceneNames.Credits, SceneNames.BeatmapEditor };
         private bool lastMainSceneWasNotMenu = false;
         GameScenesManager gameScenesManager;
+        private MultiplayerController _multiplayerController;
+        private Action<MultiplayerController.State> _multiplayerStateHandler;
+
+        // Weak keys allow old subscriber lists and their scene objects to be collected.
+        private static readonly ConditionalWeakTable<Delegate, Delegate[]> InvocationLists = new ConditionalWeakTable<Delegate, Delegate[]>();
+        private static readonly ConditionalWeakTable<Delegate, Delegate[]>.CreateValueCallback ReadInvocationList = action => action.GetInvocationList();
 
         public static void OnLoad()
         {
@@ -85,13 +92,14 @@ namespace BS_Utils.Utilities
 
         private void SceneManagerOnActiveSceneChanged(Scene arg0, Scene arg1)
         {
+            if (arg1.name != SceneNames.Game) ClearMultiplayerStateHandler();
             //    Utilities.Logger.log.Info(arg1.name);
             try
             {
                 if (arg1.name == SceneNames.Game)
                 {
 
-                    InvokeAll(gameSceneActive);
+                    InvokeSafely(gameSceneActive);
 
                     gameScenesManager = Resources.FindObjectsOfTypeAll<GameScenesManager>().FirstOrDefault();
 
@@ -105,7 +113,7 @@ namespace BS_Utils.Utilities
                 {
                     gameScenesManager = Resources.FindObjectsOfTypeAll<GameScenesManager>().FirstOrDefault();
 
-                    InvokeAll(menuSceneActive);
+                    InvokeSafely(menuSceneActive);
 
                     if (gameScenesManager != null)
                     {
@@ -137,7 +145,7 @@ namespace BS_Utils.Utilities
         private void OnMenuSceneWasLoaded(SceneTransitionType sceneTransitionType, ScenesTransitionSetupData transitionSetupData, DiContainer diContainer)
         {
             gameScenesManager.transitionDidFinishEvent -= OnMenuSceneWasLoaded;
-            InvokeAll(menuSceneLoaded);
+            InvokeSafely(menuSceneLoaded);
         }
 
         private void OnMenuSceneWasLoadedFresh(SceneTransitionType sceneTransitionType, ScenesTransitionSetupData transitionSetupData, DiContainer diContainer)
@@ -145,23 +153,28 @@ namespace BS_Utils.Utilities
             gameScenesManager.transitionDidFinishEvent -= OnMenuSceneWasLoadedFresh;
 
             var levelDetailViewController = Resources.FindObjectsOfTypeAll<StandardLevelDetailViewController>().FirstOrDefault();
-            levelDetailViewController.didChangeDifficultyBeatmapEvent += delegate (StandardLevelDetailViewController vc) { InvokeAll(difficultySelected, vc); };
+            levelDetailViewController.didChangeDifficultyBeatmapEvent += delegate (StandardLevelDetailViewController vc) { InvokeSafely(difficultySelected, vc); };
 
             var characteristicSelect = Resources.FindObjectsOfTypeAll<BeatmapCharacteristicSegmentedControlController>().FirstOrDefault();
-            characteristicSelect.didSelectBeatmapCharacteristicEvent += delegate (BeatmapCharacteristicSegmentedControlController controller, BeatmapCharacteristic characteristic) { InvokeAll(characteristicSelected, controller, characteristic); };
+            characteristicSelect.didSelectBeatmapCharacteristicEvent += delegate (BeatmapCharacteristicSegmentedControlController controller, BeatmapCharacteristic characteristic)
+            {
+                if (characteristicSelected != null)
+                    InvokeSafely(characteristicSelected, controller, controller._beatmapCharacteristicCollection.GetBeatmapCharacteristicBySerializedName(characteristic.SerializedName()));
+            };
 
             var packSelectViewController = Resources.FindObjectsOfTypeAll<LevelSelectionNavigationController>().FirstOrDefault();
-            packSelectViewController.didSelectLevelPackEvent += delegate (LevelSelectionNavigationController controller, BeatmapLevelPack pack) { InvokeAll(levelPackSelected, controller, pack); };
+            packSelectViewController.didSelectLevelPackEvent += delegate (LevelSelectionNavigationController controller, BeatmapLevelPack pack) { InvokeSafely(levelPackSelected, controller, pack); };
             var levelSelectViewController = Resources.FindObjectsOfTypeAll<LevelCollectionViewController>().FirstOrDefault();
-            levelSelectViewController.didSelectLevelEvent += delegate (LevelCollectionViewController controller, BeatmapLevel level) { InvokeAll(levelSelected, controller, level); };
+            levelSelectViewController.didSelectLevelEvent += delegate (LevelCollectionViewController controller, BeatmapLevel level) { InvokeSafely(levelSelected, controller, level); };
 
-            InvokeAll(earlyMenuSceneLoadedFresh, transitionSetupData);
-            InvokeAll(menuSceneLoadedFresh);
-            InvokeAll(lateMenuSceneLoadedFresh, transitionSetupData);
+            InvokeSafely(earlyMenuSceneLoadedFresh, transitionSetupData);
+            InvokeSafely(menuSceneLoadedFresh);
+            InvokeSafely(lateMenuSceneLoadedFresh, transitionSetupData);
         }
 
         private void GameSceneLoadedCallback(SceneTransitionType sceneTransitionType, ScenesTransitionSetupData transitionSetupData, DiContainer diContainer)
         {
+            ClearMultiplayerStateHandler();
             // Prevent firing this event when returning to menu
             var gameScenesManager = Resources.FindObjectsOfTypeAll<GameScenesManager>().FirstOrDefault();
             gameScenesManager.transitionDidFinishEvent -= GameSceneLoadedCallback;
@@ -170,7 +183,14 @@ namespace BS_Utils.Utilities
                 MultiplayerController sync = Resources.FindObjectsOfTypeAll<MultiplayerController>().LastOrDefault(x => x.isActiveAndEnabled);
                 if (sync != null)
                 {
-                    sync.stateChangedEvent += (state) => { MultiControllerStateChanged(state, transitionSetupData, diContainer, sync); };
+                    _multiplayerController = sync;
+                    _multiplayerStateHandler = state =>
+                    {
+                        if (state != MultiplayerController.State.Gameplay) return;
+                        ClearMultiplayerStateHandler();
+                        GameSceneSceneWasLoaded(transitionSetupData, diContainer, sync);
+                    };
+                    sync.stateChangedEvent += _multiplayerStateHandler;
                 }
             }
             else
@@ -179,13 +199,26 @@ namespace BS_Utils.Utilities
             }
         }
 
-        private void MultiControllerStateChanged(MultiplayerController.State newState, ScenesTransitionSetupData transitionSetupData, DiContainer diContainer, MultiplayerController sync = null)
+        private void ClearMultiplayerStateHandler()
         {
-            if (newState == MultiplayerController.State.Gameplay)
+            if (_multiplayerController != null && _multiplayerStateHandler != null)
+                _multiplayerController.stateChangedEvent -= _multiplayerStateHandler;
+            _multiplayerController = null;
+            _multiplayerStateHandler = null;
+        }
+
+        private void OnDestroy()
+        {
+            if (Instance != this) return;
+            SceneManager.activeSceneChanged -= SceneManagerOnActiveSceneChanged;
+            ClearMultiplayerStateHandler();
+            if (gameScenesManager != null)
             {
-                sync.stateChangedEvent -= (state) => { MultiControllerStateChanged(state, transitionSetupData, diContainer, sync); };
-                GameSceneSceneWasLoaded(transitionSetupData, diContainer, sync);
+                gameScenesManager.transitionDidFinishEvent -= GameSceneLoadedCallback;
+                gameScenesManager.transitionDidFinishEvent -= OnMenuSceneWasLoaded;
+                gameScenesManager.transitionDidFinishEvent -= OnMenuSceneWasLoadedFresh;
             }
+            Instance = null;
         }
 
         private void GameSceneSceneWasLoaded(ScenesTransitionSetupData transitionSetupData, DiContainer diContainer, MultiplayerController sync = null)
@@ -195,49 +228,49 @@ namespace BS_Utils.Utilities
             var pauseManager = diContainer.TryResolve<PauseController>();
             if (pauseManager != null)
             {
-                pauseManager.didResumeEvent += delegate { InvokeAll(songUnpaused); };
-                pauseManager.didPauseEvent += delegate { InvokeAll(songPaused); };
+                pauseManager.didResumeEvent += delegate { InvokeSafely(songUnpaused); };
+                pauseManager.didPauseEvent += delegate { InvokeSafely(songPaused); };
             }
 
             var beatmapObjectManager = diContainer.TryResolve<BeatmapObjectManager>();
             if (beatmapObjectManager != null)
             {
-                beatmapObjectManager.noteWasCutEvent += (NoteController controller, in NoteCutInfo noteCutInfo) => InvokeAll(noteWasCut, controller, noteCutInfo);
-                beatmapObjectManager.noteWasMissedEvent += controller => InvokeAll(noteWasMissed, controller);
+                beatmapObjectManager.noteWasCutEvent += (NoteController controller, in NoteCutInfo noteCutInfo) => InvokeSafely(noteWasCut, controller, noteCutInfo);
+                beatmapObjectManager.noteWasMissedEvent += controller => InvokeSafely(noteWasMissed, controller);
             }
 
             var comboController = diContainer.TryResolve<ComboController>();
             if (comboController != null)
             {
-                comboController.comboDidChangeEvent += delegate (int combo) { InvokeAll(comboDidChange, combo); };
-                comboController.comboBreakingEventHappenedEvent += delegate { InvokeAll(comboDidBreak); };
+                comboController.comboDidChangeEvent += delegate (int combo) { InvokeSafely(comboDidChange, combo); };
+                comboController.comboBreakingEventHappenedEvent += delegate { InvokeSafely(comboDidBreak); };
             }
 
             var scoreController = diContainer.TryResolve<ScoreController>();
             if (scoreController != null)
             {
-                scoreController.multiplierDidChangeEvent += delegate (int multiplier, float progress) { InvokeAll(multiplierDidChange, multiplier, progress);
+                scoreController.multiplierDidChangeEvent += delegate (int multiplier, float progress) { InvokeSafely(multiplierDidChange, multiplier, progress);
                 if (multiplier > 1 && progress < 0.1f)
-                    InvokeAll(multiplierDidIncrease, multiplier); };
-                scoreController.scoreDidChangeEvent += delegate { InvokeAll(scoreDidChange); };
+                    InvokeSafely(multiplierDidIncrease, multiplier); };
+                scoreController.scoreDidChangeEvent += (score, modifiedScore) => InvokeSafely(scoreDidChange, score);
             }
 
             var saberCollisionManager = Resources.FindObjectsOfTypeAll<ObstacleSaberSparkleEffectManager>().LastOrDefault(x => x.isActiveAndEnabled);
             if (saberCollisionManager != null)
             {
-                saberCollisionManager.sparkleEffectDidStartEvent += delegate (SaberType saber) { InvokeAll(sabersStartCollide, saber); };
-                saberCollisionManager.sparkleEffectDidEndEvent += delegate (SaberType saber) { InvokeAll(sabersEndCollide, saber); };
+                saberCollisionManager.sparkleEffectDidStartEvent += delegate (SaberType saber) { InvokeSafely(sabersStartCollide, saber); };
+                saberCollisionManager.sparkleEffectDidEndEvent += delegate (SaberType saber) { InvokeSafely(sabersEndCollide, saber); };
             }
 
             var gameEnergyCounter = Resources.FindObjectsOfTypeAll<GameEnergyCounter>().LastOrDefault(x => x.isActiveAndEnabled);
             if (gameEnergyCounter != null)
             {
-                gameEnergyCounter.gameEnergyDidReach0Event += delegate { InvokeAll(energyReachedZero); };
-                gameEnergyCounter.gameEnergyDidChangeEvent += delegate (float energy) { InvokeAll(energyDidChange, energy); };
+                gameEnergyCounter.gameEnergyDidReach0Event += delegate { InvokeSafely(energyReachedZero); };
+                gameEnergyCounter.gameEnergyDidChangeEvent += delegate (float energy) { InvokeSafely(energyDidChange, energy); };
             }
 
             var beatmapCallbacksController = diContainer.TryResolve<BeatmapCallbacksController>();
-            beatmapCallbacksController?.AddBeatmapCallback(new BeatmapDataCallback<BeatmapEventData>(songEvent => InvokeAll(beatmapEvent, songEvent)));
+            beatmapCallbacksController?.AddBeatmapCallback(new BeatmapDataCallback<BeatmapEventData>(songEvent => InvokeSafely(beatmapEvent, songEvent)));
 
             var transitionSetup = diContainer.TryResolve<StandardLevelScenesTransitionSetupData>();
             if (transitionSetup != null)
@@ -246,7 +279,7 @@ namespace BS_Utils.Utilities
                 transitionSetup.didFinishEvent += OnTransitionSetupOnDidFinishEvent;
             }
 
-            InvokeAll(gameSceneLoaded);
+            InvokeSafely(gameSceneLoaded);
         }
 
         private void OnTransitionSetupOnDidFinishEvent(StandardLevelScenesTransitionSetupData data, LevelCompletionResults results)
@@ -254,24 +287,62 @@ namespace BS_Utils.Utilities
             switch (results.levelEndStateType)
             {
                 case LevelCompletionResults.LevelEndStateType.Cleared:
-                    InvokeAll(levelCleared, data, results);
+                    InvokeSafely(levelCleared, data, results);
                     break;
                 case LevelCompletionResults.LevelEndStateType.Failed:
-                    InvokeAll(results.levelEndAction == LevelCompletionResults.LevelEndAction.Restart ? levelRestarted : levelFailed, data, results);
+                    if (results.levelEndAction != LevelCompletionResults.LevelEndAction.Restart)
+                        InvokeSafely(levelFailed, data, results);
                     break;
             }
 
             switch (results.levelEndAction)
             {
                 case LevelCompletionResults.LevelEndAction.Quit:
-                    InvokeAll(levelQuit, data, results);
+                    InvokeSafely(levelQuit, data, results);
                     break;
                 case LevelCompletionResults.LevelEndAction.Restart:
-                    InvokeAll(levelRestarted, data, results);
+                    InvokeSafely(levelRestarted, data, results);
                     break;
             }
         }
 
+        private static void InvokeSafely(Action action)
+        {
+            if (action == null) return;
+            foreach (Action handler in InvocationLists.GetValue(action, ReadInvocationList))
+            {
+                try { handler(); }
+                catch (Exception ex) { LogHandlerException(handler, ex); }
+            }
+        }
+
+        private static void InvokeSafely<T>(Action<T> action, T arg)
+        {
+            if (action == null) return;
+            foreach (Action<T> handler in InvocationLists.GetValue(action, ReadInvocationList))
+            {
+                try { handler(arg); }
+                catch (Exception ex) { LogHandlerException(handler, ex); }
+            }
+        }
+
+        private static void InvokeSafely<T1, T2>(Action<T1, T2> action, T1 arg1, T2 arg2)
+        {
+            if (action == null) return;
+            foreach (Action<T1, T2> handler in InvocationLists.GetValue(action, ReadInvocationList))
+            {
+                try { handler(arg1, arg2); }
+                catch (Exception ex) { LogHandlerException(handler, ex); }
+            }
+        }
+
+        private static void LogHandlerException(Delegate handler, Exception ex)
+        {
+            Logger.log.Error($"Caught Exception when executing event: {ex.Message}\n In Assembly: {handler.Method.DeclaringType?.Assembly.FullName}");
+            Logger.log.Debug(ex);
+        }
+
+        // Retain the public params API for existing callers. Internal events use typed dispatch.
         public void InvokeAll<T1, T2, T3>(Action<T1, T2, T3> action, params object[] args)
         {
             Delegate[] actions = action?.GetInvocationList();
