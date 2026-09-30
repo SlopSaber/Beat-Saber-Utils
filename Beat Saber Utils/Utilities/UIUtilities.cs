@@ -2,6 +2,7 @@
 using UnityEngine;
 using System.Reflection;
 using System.IO;
+using System.Threading.Tasks;
 
 namespace BS_Utils.Utilities
 {
@@ -19,9 +20,11 @@ namespace BS_Utils.Utilities
             return null;
         }
 
-        public static Texture2D LoadTextureFromResources(string resourcePath)
+        public static async Task<Texture2D> LoadTextureFromResourcesAsync(Assembly resourceAssembly, string resourcePath)
         {
-            return LoadTextureRaw(GetResource(Assembly.GetCallingAssembly(), resourcePath));
+            var bytes = await Task.Run(() => GetResource(resourceAssembly, resourcePath));
+            await IPA.Utilities.UnityGame.SwitchToMainThreadAsync();
+            return LoadTextureRaw(bytes);
         }
 
         public static byte[] GetResource(Assembly asm, string resourceName)

@@ -82,6 +82,7 @@ namespace BS_Utils.Gameplay
                 if (!isReady)
                     await shouldBeReadyTask.Task;
                 await Task.Delay(200);
+                await IPA.Utilities.UnityGame.SwitchToMainThreadAsync();
                 lock (getUserLock)
                 {
 
@@ -125,7 +126,11 @@ namespace BS_Utils.Gameplay
                 if (userInfo.platform == UserInfo.Platform.Steam)
                     GetSteamAvatar();
                 else if (userInfo.platform == UserInfo.Platform.Oculus)
-                    userAvatar = UIUtilities.LoadTextureFromResources("BS_Utils.Resources.oculus.png");
+                {
+                    var avatar = await UIUtilities.LoadTextureFromResourcesAsync(typeof(GetUserInfo).Assembly, "BS_Utils.Resources.oculus.png");
+                    await IPA.Utilities.UnityGame.SwitchToMainThreadAsync();
+                    userAvatar = avatar;
+                }
             }
             else
                 throw new InvalidOperationException("UserInfo is null.");
