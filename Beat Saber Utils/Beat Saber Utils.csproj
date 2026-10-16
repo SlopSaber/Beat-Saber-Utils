@@ -42,6 +42,7 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <Reference Include="System.Core" />
         <Reference Include="netstandard">
             <HintPath>$(GameDirectory)\Beat Saber_Data\Managed\netstandard.dll</HintPath>
             <Private>False</Private>
